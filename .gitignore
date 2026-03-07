@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-electron/
+out/
+release/
+
+# Environment & IDE
+.env
+.env.local
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+
+# Electron build artifacts
+*.dmg
+*.snap
+*.AppImage
+*.deb
+*.rpm
+*.exe
+*.msi
+*.nupkg
+
+# Temp files
+*.tmp
+clipvid-thumbs/
