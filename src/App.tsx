@@ -8,6 +8,7 @@ import { useState } from 'react';
 import MediaBin from './components/MediaBin';
 import Player from './components/Player';
 import PropertiesPanel from './components/PropertiesPanel';
+import SubtitleEditor from './components/SubtitleEditor';
 import Timeline from './components/Timeline';
 import TransitionsBin from './components/TransitionsBin';
 import './index.css';
@@ -54,14 +55,7 @@ function SidebarPanel() {
   return (
     <aside className="sidebar-panel">
       {state.sidebarTab === 'media' && <MediaBin />}
-      {state.sidebarTab === 'text' && (
-        <div className="sidebar-placeholder">
-          <Type size={32} opacity={0.2} />
-          <h3>Text Overlays</h3>
-          <p>Add titles, captions, and lower thirds to your video.</p>
-          <span className="coming-soon-badge">Coming soon</span>
-        </div>
-      )}
+      {state.sidebarTab === 'text' && <SubtitleEditor />}
       {state.sidebarTab === 'transitions' && <TransitionsBin />}
       {state.sidebarTab === 'filters' && (
         <div className="sidebar-placeholder">

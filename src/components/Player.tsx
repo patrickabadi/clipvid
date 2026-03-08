@@ -2,6 +2,7 @@ import { MonitorPlay, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } fro
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTimelineContext } from '../lib/TimelineContext';
 import { Clip, Track, TransitionType } from '../lib/types';
+import SubtitleOverlay from './SubtitleOverlay';
 
 function getMediaUrl(filePath: string): string {
   if (window.electronAPI?.getFileUrl) {
@@ -644,30 +645,36 @@ const Player: React.FC = () => {
         if (vc) {
           if (vidClipId !== vc.id) loadVid(vc);
 
-          const playing = vid != null && !vid.paused && vid.readyState >= 2;
+          // Check end-of-clip FIRST — before playing/stall logic —
+          // so that a video which reached its natural end (vid.ended)
+          // advances to the next clip instead of being restarted.
+          const srcEnd = vc.sourceStart + vc.duration * vc.speedMultiplier;
+          const clipDone = vid != null && vid.readyState >= 1 &&
+            (vid.currentTime >= srcEnd - 0.05 || vid.ended);
 
-          if (playing) {
-            stalledSince = null;
-            pendingVideoSeek.current = null;
-            const srcEnd = vc.sourceStart + vc.duration * vc.speedMultiplier;
-            if (vid!.currentTime >= srcEnd - 0.02) {
-              cursor = vc.startOffset + vc.duration;
-              unloadVid();
-              const next = findClipAt(cursor, 'video');
-              if (next) loadVid(next);
-            } else {
-              cursor = vc.startOffset + (vid!.currentTime - vc.sourceStart) / vc.speedMultiplier;
-            }
+          if (clipDone) {
+            cursor = vc.startOffset + vc.duration;
+            unloadVid();
+            const next = findClipAt(cursor, 'video');
+            if (next) loadVid(next);
           } else {
-            if (vid && vid.readyState >= 2 && vid.paused && pendingVideoSeek.current === null) {
-              vid.play().catch(() => {});
-            }
-            if (!stalledSince) stalledSince = performance.now();
-            if (now - stalledSince > STALL_MS) {
-              cursor += dt;
-              if (cursor >= vc.startOffset + vc.duration) {
-                cursor = vc.startOffset + vc.duration;
-                unloadVid();
+            const playing = vid != null && !vid.paused && vid.readyState >= 2;
+
+            if (playing) {
+              stalledSince = null;
+              pendingVideoSeek.current = null;
+              cursor = vc.startOffset + (vid!.currentTime - vc.sourceStart) / vc.speedMultiplier;
+            } else {
+              if (vid && vid.readyState >= 2 && vid.paused && pendingVideoSeek.current === null) {
+                vid.play().catch(() => {});
+              }
+              if (!stalledSince) stalledSince = performance.now();
+              if (now - stalledSince > STALL_MS) {
+                cursor += dt;
+                if (cursor >= vc.startOffset + vc.duration) {
+                  cursor = vc.startOffset + vc.duration;
+                  unloadVid();
+                }
               }
             }
           }
@@ -777,34 +784,37 @@ const Player: React.FC = () => {
         {/* Transition overlay (fade/flash/etc) */}
         <div ref={transOverlayRef} className="player-transition-overlay" />
 
+        {/* Subtitle overlay */}
+        <SubtitleOverlay />
+
         {!hasVideoAtCursor && (
           <div className="video-empty-state">
             <MonitorPlay size={48} opacity={0.15} />
             <span>No video at playhead</span>
           </div>
         )}
+      </div>
 
-        <div className="player-controls-container">
-          <div className="player-controls glass-panel">
-            <button className="player-btn" onClick={skipBackward} title="Skip Back 5s (Left Arrow)">
-              <SkipBack size={18} />
-            </button>
-            <button className="player-btn play" onClick={togglePlayback} title="Play/Pause (Space)">
-              {state.isPlaying
-                ? <Pause size={18} fill="currentColor" />
-                : <Play size={18} fill="currentColor" style={{ marginLeft: '2px' }} />}
-            </button>
-            <button className="player-btn" onClick={skipForward} title="Skip Forward 5s (Right Arrow)">
-              <SkipForward size={18} />
-            </button>
-            <div className="player-divider" />
-            <button className="player-btn" onClick={() => setMuted(m => !m)} title="Mute/Unmute (M)">
-              {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
-            </button>
-            <div className="player-divider" />
-            <div className="timecode-display">
-              {formatTimecode(state.cursorPosition)}
-            </div>
+      <div className="player-controls-bar">
+        <div className="player-controls glass-panel">
+          <button className="player-btn" onClick={skipBackward} title="Skip Back 5s (Left Arrow)">
+            <SkipBack size={18} />
+          </button>
+          <button className="player-btn play" onClick={togglePlayback} title="Play/Pause (Space)">
+            {state.isPlaying
+              ? <Pause size={18} fill="currentColor" />
+              : <Play size={18} fill="currentColor" style={{ marginLeft: '2px' }} />}
+          </button>
+          <button className="player-btn" onClick={skipForward} title="Skip Forward 5s (Right Arrow)">
+            <SkipForward size={18} />
+          </button>
+          <div className="player-divider" />
+          <button className="player-btn" onClick={() => setMuted(m => !m)} title="Mute/Unmute (M)">
+            {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+          </button>
+          <div className="player-divider" />
+          <div className="timecode-display">
+            {formatTimecode(state.cursorPosition)}
           </div>
         </div>
       </div>

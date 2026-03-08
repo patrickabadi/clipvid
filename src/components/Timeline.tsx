@@ -1,11 +1,11 @@
 import {
     Copy, Eye, EyeOff, Film, Lock, Magnet, Maximize2, Music, Plus,
-    Scissors, SkipBack, SkipForward, Sparkles, Trash2, Unlock, Volume2, VolumeX,
+    Scissors, SkipBack, SkipForward, Sparkles, Trash2, Type, Unlock, Volume2, VolumeX,
     ZoomIn, ZoomOut,
 } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTimelineContext } from '../lib/TimelineContext';
-import { Clip, TransitionType } from '../lib/types';
+import { Clip, SubtitleAnimation, SubtitleFontFamily, TransitionType } from '../lib/types';
 
 const PX_PER_SEC_BASE = 50;
 const TRACK_HEADER_W = 150;
@@ -50,6 +50,7 @@ interface DragInfo {
   origDuration: number;
   origSourceStart: number;
   origSpeed: number;
+  mediaDuration: number; // total source media duration for speed-stretch
 }
 
 /* Trim feedback tooltip state */
@@ -73,9 +74,12 @@ const Timeline: React.FC = () => {
     toggleTrackMute, toggleTrackLock, toggleTrackVisible, fitToTimeline,
     jumpToStart, jumpToEnd, pushUndo,
     selectTransition, addTransition, removeTransition,
+    selectSubtitle, updateSubtitle, updateSubtitleStyle, removeSubtitle,
   } = useTimelineContext();
 
   const [mediaDropTarget, setMediaDropTarget] = useState<string | null>(null);
+  const [subPopupId, setSubPopupId] = useState<string | null>(null);
+  const subPopupRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragInfo | null>(null);
   const [snapLine, setSnapLine] = useState<number | null>(null);
   const [ctxMenu, setCtxMenu] = useState<ContextMenu | null>(null);
@@ -89,6 +93,9 @@ const Timeline: React.FC = () => {
   // Refs so the drag effect doesn't re-run when state changes mid-drag
   const pxPerSecRef = useRef(pxPerSec);
   pxPerSecRef.current = pxPerSec;
+
+  const mediaLibRef = useRef(state.mediaLibrary);
+  mediaLibRef.current = state.mediaLibrary;
 
   const totalWidthPx = useMemo(() => {
     let maxEnd = 300;
@@ -152,11 +159,14 @@ const Timeline: React.FC = () => {
 
     pushUndo();
 
+    const media = mediaLibRef.current.find(m => m.id === clip.mediaId);
+    const mediaDuration = media?.duration ?? Infinity;
+
     dragTrackRef.current = trackId;
     setDrag({
       type, clipId: clip.id, trackId, startX: e.clientX, startY: e.clientY,
       origStart: clip.startOffset, origDuration: clip.duration, origSourceStart: clip.sourceStart,
-      origSpeed: clip.speedMultiplier,
+      origSpeed: clip.speedMultiplier, mediaDuration,
     });
   }, [selectClip, pushUndo, setCursorPosition, pxPerSec]);
 
@@ -200,24 +210,55 @@ const Timeline: React.FC = () => {
         const rawS = Math.max(0, Math.min(maxS, drag.origStart + dt));
         const s = snap([rawS], drag.clipId);
         const finalS = Math.max(0, Math.min(maxS, rawS + s.delta));
-        const diff = finalS - drag.origStart;
+        const diff = finalS - drag.origStart; // negative when extending left
         setSnapLine(s.pos);
-        const newSourceStart = drag.origSourceStart + diff * drag.origSpeed;
-        updateClip(drag.trackId, drag.clipId, {
-          startOffset: finalS,
-          duration: drag.origDuration - diff,
-          sourceStart: newSourceStart,
-        });
-        setTrimFeedback({ clipId: drag.clipId, side: 'left', label: `In: ${fmtTime(newSourceStart)}` });
+
+        const newDuration = drag.origDuration - diff;
+        const candidateSourceStart = drag.origSourceStart + diff * drag.origSpeed;
+
+        if (candidateSourceStart >= 0) {
+          // Normal trim — there's source material to reveal
+          updateClip(drag.trackId, drag.clipId, {
+            startOffset: finalS,
+            duration: newDuration,
+            sourceStart: candidateSourceStart,
+          });
+          setTrimFeedback({ clipId: drag.clipId, side: 'left', label: `In: ${fmtTime(candidateSourceStart)}` });
+        } else {
+          // Stretching beyond source start — slow down to fill
+          const availableSource = drag.mediaDuration;
+          const newSpeed = availableSource / newDuration;
+          updateClip(drag.trackId, drag.clipId, {
+            startOffset: finalS,
+            duration: newDuration,
+            sourceStart: 0,
+            speedMultiplier: newSpeed,
+          });
+          const speedPct = Math.round(newSpeed * 100);
+          setTrimFeedback({ clipId: drag.clipId, side: 'left', label: `${speedPct}% speed` });
+        }
       } else {
         const rawD = Math.max(MIN_DUR, drag.origDuration + dt);
         const end = drag.origStart + rawD;
         const s = snap([end], drag.clipId);
         const finalD = Math.max(MIN_DUR, rawD + s.delta);
         setSnapLine(s.pos);
-        const outPoint = drag.origSourceStart + finalD * drag.origSpeed;
-        updateClip(drag.trackId, drag.clipId, { duration: finalD });
-        setTrimFeedback({ clipId: drag.clipId, side: 'right', label: `Out: ${fmtTime(outPoint)}` });
+
+        // How much source material is available from sourceStart
+        const availableSource = drag.mediaDuration - drag.origSourceStart;
+        // Source needed at original speed
+        const sourceNeeded = finalD * drag.origSpeed;
+
+        let newSpeed = drag.origSpeed;
+        if (sourceNeeded > availableSource && availableSource > 0) {
+          // Stretch: slow down so available source fills the new duration
+          newSpeed = availableSource / finalD;
+        }
+
+        const outPoint = drag.origSourceStart + finalD * newSpeed;
+        updateClip(drag.trackId, drag.clipId, { duration: finalD, speedMultiplier: newSpeed });
+        const speedPct = Math.round(newSpeed * 100);
+        setTrimFeedback({ clipId: drag.clipId, side: 'right', label: newSpeed !== drag.origSpeed ? `${speedPct}% speed` : `Out: ${fmtTime(outPoint)}` });
       }
     };
 
@@ -247,6 +288,19 @@ const Timeline: React.FC = () => {
     document.addEventListener('contextmenu', close);
     return () => { document.removeEventListener('click', close); document.removeEventListener('contextmenu', close); };
   }, [ctxMenu]);
+
+  // Close subtitle popup on outside click
+  useEffect(() => {
+    if (!subPopupId) return;
+    const close = (e: MouseEvent) => {
+      if (subPopupRef.current && !subPopupRef.current.contains(e.target as Node)) {
+        setSubPopupId(null);
+      }
+    };
+    // Delay to avoid closing on the click that opened it
+    const timer = setTimeout(() => document.addEventListener('mousedown', close), 0);
+    return () => { clearTimeout(timer); document.removeEventListener('mousedown', close); };
+  }, [subPopupId]);
 
   /* ──────── Media drop from bin ──────── */
 
@@ -680,6 +734,115 @@ const Timeline: React.FC = () => {
               </div>
             </div>
           ))}
+
+          {/* ── Subtitle track ── */}
+          {state.subtitles.length > 0 && (
+            <div className="track-row subtitle-track-row" style={{ minWidth: totalWidthPx }}>
+              <div className="track-header" onClick={e => e.stopPropagation()}>
+                <div className="track-info">
+                  <Type size={12} className="track-type-icon subtitle" />
+                  <span>Subtitles</span>
+                </div>
+              </div>
+              <div className="track-content">
+                {state.subtitles.map(sub => {
+                  const left = sub.startTime * pxPerSec;
+                  const width = Math.max((sub.endTime - sub.startTime) * pxPerSec, 20);
+                  const sel = state.selectedSubtitleId === sub.id;
+                  return (
+                    <div
+                      key={sub.id}
+                      className={`timeline-subtitle${sel ? ' selected' : ''}`}
+                      style={{
+                        left,
+                        width,
+                        '--sub-color': sub.style.highlightColor || '#8b5cf6',
+                      } as React.CSSProperties}
+                      onClick={e => {
+                        e.stopPropagation();
+                        selectSubtitle(sub.id);
+                        setCursorPosition(sub.startTime);
+                        setSubPopupId(prev => prev === sub.id ? null : sub.id);
+                      }}
+                      title={sub.text}
+                    >
+                      <Type size={10} />
+                      <span className="subtitle-clip-text">{sub.text}</span>
+                    </div>
+                  );
+                })}
+
+                {/* Subtitle popup editor */}
+                {subPopupId && (() => {
+                  const sub = state.subtitles.find(s => s.id === subPopupId);
+                  if (!sub) return null;
+                  const popLeft = sub.startTime * pxPerSec;
+                  return (
+                    <div ref={subPopupRef} className="sub-popup" style={{ left: Math.max(0, popLeft - 20) }} onClick={e => e.stopPropagation()}>
+                      <div className="sub-popup-header">
+                        <span>Edit Subtitle</span>
+                        <button className="sub-popup-close" onClick={() => setSubPopupId(null)}>&times;</button>
+                      </div>
+                      <textarea
+                        className="sub-popup-text"
+                        value={sub.text}
+                        onChange={e => updateSubtitle(sub.id, { text: e.target.value })}
+                        rows={2}
+                        placeholder="Subtitle text..."
+                      />
+                      <div className="sub-popup-row">
+                        <label>Start</label>
+                        <input type="number" className="sub-popup-input" value={Number(sub.startTime.toFixed(1))}
+                          onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v >= 0) updateSubtitle(sub.id, { startTime: v }); }}
+                          step={0.1} min={0} />
+                        <label>End</label>
+                        <input type="number" className="sub-popup-input" value={Number(sub.endTime.toFixed(1))}
+                          onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > sub.startTime) updateSubtitle(sub.id, { endTime: v }); }}
+                          step={0.1} min={sub.startTime + 0.1} />
+                      </div>
+                      <div className="sub-popup-row">
+                        <label>Font</label>
+                        <select className="sub-popup-select" value={sub.style.fontFamily}
+                          onChange={e => updateSubtitleStyle(sub.id, { fontFamily: e.target.value as SubtitleFontFamily })}>
+                          {(['Montserrat','Poppins','Bangers','Bebas Neue','Oswald','Luckiest Guy','Permanent Marker','Fredoka'] as SubtitleFontFamily[]).map(f =>
+                            <option key={f} value={f}>{f}</option>
+                          )}
+                        </select>
+                      </div>
+                      <div className="sub-popup-row">
+                        <label>Size</label>
+                        <input type="range" className="sub-popup-range" value={sub.style.fontSize}
+                          onChange={e => updateSubtitleStyle(sub.id, { fontSize: Number(e.target.value) })}
+                          min={16} max={120} />
+                        <span className="sub-popup-val">{sub.style.fontSize}px</span>
+                      </div>
+                      <div className="sub-popup-row">
+                        <label>Color</label>
+                        <input type="color" className="sub-popup-color" value={sub.style.color}
+                          onChange={e => updateSubtitleStyle(sub.id, { color: e.target.value })} />
+                        <label>Outline</label>
+                        <input type="color" className="sub-popup-color"
+                          value={sub.style.strokeColor === 'transparent' ? '#000000' : sub.style.strokeColor}
+                          onChange={e => updateSubtitleStyle(sub.id, { strokeColor: e.target.value })} />
+                      </div>
+                      <div className="sub-popup-row">
+                        <label>Anim</label>
+                        <select className="sub-popup-select" value={sub.style.animation}
+                          onChange={e => updateSubtitleStyle(sub.id, { animation: e.target.value as SubtitleAnimation })}>
+                          {(['none','pop','fade','typewriter','bounce','slide-up'] as SubtitleAnimation[]).map(a =>
+                            <option key={a} value={a}>{a}</option>
+                          )}
+                        </select>
+                      </div>
+                      <button className="sub-popup-delete" onClick={() => { removeSubtitle(sub.id); setSubPopupId(null); }}>
+                        <Trash2 size={11} /> Delete
+                      </button>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
 
           {/* Playhead */}
           <div className="playhead-line" style={{ left: playheadLeft }}>

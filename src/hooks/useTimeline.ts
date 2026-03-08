@@ -1,11 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Clip, ClipTransition, MediaItem, ProjectState, SidebarTab, Track } from '../lib/types';
+import { Clip, ClipTransition, MediaItem, ProjectState, SidebarTab, SubtitleItem, SubtitleStyle, Track } from '../lib/types';
 
 /** Fetch a thumbnail from Electron's ffmpeg backend; returns '' if unavailable */
 function fetchThumbnail(filePath: string, timestamp: number): Promise<string> {
   if (!window.electronAPI?.getThumbnail) return Promise.resolve('');
   return window.electronAPI.getThumbnail(filePath, Math.max(0, timestamp)).catch(() => '');
 }
+
+const DEFAULT_GLOBAL_STYLE: SubtitleStyle = {
+  fontFamily: 'Montserrat',
+  fontSize: 54,
+  fontWeight: 800,
+  color: '#ffffff',
+  highlightColor: '#8b5cf6',
+  strokeColor: '#000000',
+  strokeWidth: 3,
+  backgroundColor: 'transparent',
+  backgroundPadding: 8,
+  backgroundRadius: 8,
+  position: 'bottom',
+  animation: 'pop',
+  uppercase: true,
+  letterSpacing: 1,
+  lineHeight: 1.2,
+  maxWidth: 90,
+};
 
 const initialState: ProjectState = {
   mediaLibrary: [],
@@ -15,6 +34,9 @@ const initialState: ProjectState = {
     { id: 'a1', name: 'Audio 1', type: 'audio', clips: [], muted: false, locked: false, visible: true },
     { id: 'a2', name: 'Audio 2', type: 'audio', clips: [], muted: false, locked: false, visible: true },
   ],
+  subtitles: [],
+  globalSubtitleStyle: DEFAULT_GLOBAL_STYLE,
+  selectedSubtitleId: null,
   cursorPosition: 0,
   scale: 1,
   selectedClipId: null,
@@ -249,11 +271,11 @@ export function useTimeline() {
   }, [pushUndo]);
 
   const selectClip = useCallback((clipId: string | null) => {
-    setState(prev => ({ ...prev, selectedClipId: clipId, selectedTransitionClipId: null }));
+    setState(prev => ({ ...prev, selectedClipId: clipId, selectedTransitionClipId: null, selectedSubtitleId: null }));
   }, []);
 
   const selectTransition = useCallback((clipId: string | null) => {
-    setState(prev => ({ ...prev, selectedTransitionClipId: clipId, selectedClipId: clipId ? null : prev.selectedClipId }));
+    setState(prev => ({ ...prev, selectedTransitionClipId: clipId, selectedClipId: clipId ? null : prev.selectedClipId, selectedSubtitleId: null }));
   }, []);
 
   const addTransition = useCallback((trackId: string, clipId: string, transition: ClipTransition) => {
@@ -422,6 +444,115 @@ export function useTimeline() {
     return () => window.removeEventListener('keydown', onKey);
   }, [undo, redo]);
 
+  /* ── Subtitle management ── */
+
+  const addSubtitle = useCallback((subtitle: SubtitleItem) => {
+    pushUndo();
+    setState(prev => ({
+      ...prev,
+      subtitles: [...prev.subtitles, subtitle],
+      selectedSubtitleId: subtitle.id,
+      selectedClipId: null,
+      selectedTransitionClipId: null,
+    }));
+  }, [pushUndo]);
+
+  const addSubtitlesBatch = useCallback((subtitles: SubtitleItem[]) => {
+    if (subtitles.length === 0) return;
+    pushUndo();
+    setState(prev => ({
+      ...prev,
+      subtitles: [...prev.subtitles, ...subtitles],
+      selectedSubtitleId: subtitles[0].id,
+      selectedClipId: null,
+      selectedTransitionClipId: null,
+    }));
+  }, [pushUndo]);
+
+  const updateSubtitle = useCallback((id: string, updates: Partial<SubtitleItem>) => {
+    setState(prev => ({
+      ...prev,
+      subtitles: prev.subtitles.map(s => s.id === id ? { ...s, ...updates } : s),
+    }));
+  }, []);
+
+  const updateSubtitleStyle = useCallback((id: string, styleUpdates: Partial<SubtitleStyle>) => {
+    setState(prev => ({
+      ...prev,
+      subtitles: prev.subtitles.map(s =>
+        s.id === id ? { ...s, style: { ...s.style, ...styleUpdates } } : s
+      ),
+    }));
+  }, []);
+
+  const removeSubtitle = useCallback((id: string) => {
+    pushUndo();
+    setState(prev => ({
+      ...prev,
+      subtitles: prev.subtitles.filter(s => s.id !== id),
+      selectedSubtitleId: prev.selectedSubtitleId === id ? null : prev.selectedSubtitleId,
+    }));
+  }, [pushUndo]);
+
+  const selectSubtitle = useCallback((id: string | null) => {
+    setState(prev => ({
+      ...prev,
+      selectedSubtitleId: id,
+      selectedClipId: id ? null : prev.selectedClipId,
+      selectedTransitionClipId: id ? null : prev.selectedTransitionClipId,
+      // Auto-open sidebar to text tab when selecting a subtitle
+      ...(id ? { sidebarTab: 'text' as const, sidebarOpen: true } : {}),
+    }));
+  }, []);
+
+  const duplicateSubtitle = useCallback((id: string) => {
+    pushUndo();
+    setState(prev => {
+      const sub = prev.subtitles.find(s => s.id === id);
+      if (!sub) return prev;
+      const newSub: SubtitleItem = {
+        ...sub,
+        id: Math.random().toString(36).substr(2, 12),
+        startTime: sub.endTime,
+        endTime: sub.endTime + (sub.endTime - sub.startTime),
+      };
+      return {
+        ...prev,
+        subtitles: [...prev.subtitles, newSub],
+        selectedSubtitleId: newSub.id,
+      };
+    });
+  }, [pushUndo]);
+
+  const updateGlobalSubtitleStyle = useCallback((styleUpdates: Partial<SubtitleStyle>) => {
+    pushUndo();
+    setState(prev => ({
+      ...prev,
+      globalSubtitleStyle: { ...prev.globalSubtitleStyle, ...styleUpdates },
+    }));
+  }, [pushUndo]);
+
+  const applyGlobalStyleToAll = useCallback((styleUpdates: Partial<SubtitleStyle>) => {
+    pushUndo();
+    setState(prev => ({
+      ...prev,
+      globalSubtitleStyle: { ...prev.globalSubtitleStyle, ...styleUpdates },
+      subtitles: prev.subtitles.map(s => ({
+        ...s,
+        style: { ...s.style, ...styleUpdates },
+      })),
+    }));
+  }, [pushUndo]);
+
+  const clearAllSubtitles = useCallback(() => {
+    pushUndo();
+    setState(prev => ({
+      ...prev,
+      subtitles: [],
+      selectedSubtitleId: null,
+    }));
+  }, [pushUndo]);
+
   return {
     state,
     addMediaToLibrary, removeMedia, addClip, updateClip, moveClipToTrack, removeClip, splitClip, duplicateClip,
@@ -430,6 +561,8 @@ export function useTimeline() {
     togglePlayback, stopPlayback, skipBackward, skipForward, jumpToStart, jumpToEnd,
     fitToTimeline, toggleTrackMute, toggleTrackLock, toggleTrackVisible,
     setProjectName, setSidebarTab, toggleSidebar,
+    addSubtitle, addSubtitlesBatch, updateSubtitle, updateSubtitleStyle, removeSubtitle, selectSubtitle, duplicateSubtitle,
+    updateGlobalSubtitleStyle, applyGlobalStyleToAll, clearAllSubtitles,
     undo, redo, canUndo, canRedo, pushUndo,
   };
 }
